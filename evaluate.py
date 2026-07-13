@@ -20,11 +20,12 @@ sys.path.append(os.path.join(os.getcwd()))
 
 warnings.filterwarnings("ignore", message="xFormers is not available*")
 
-from config.config_eval import config as cfg
-from backbone import get_model
+from configs.config import config as cfg
+from backbones import get_model
 from data.transform import transform_image
-from utils.evaluation import CallBackVerification, CallBackVerificationBias
-from utils.logging import init_logging
+from utils.evaluation import CallBackVerification
+#from utils.evaluation import CallBackVerificationBias
+from utils.utils_logging import init_logging
 from finetuning import apply_lora_model
 from utils.evaluate_cifar import evaluate_model
 from utils.validate_tinyface import tinyface_eval
