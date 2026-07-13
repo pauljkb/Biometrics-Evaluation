@@ -4,6 +4,7 @@ from .mobilefacenet import get_mbf
 
 def get_model(name, **kwargs):
     # resnet
+    name = kwargs["network"]
     if name == "r18":
         return iresnet18(False, **kwargs)
     elif name == "r34":

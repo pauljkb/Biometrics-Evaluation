@@ -20,21 +20,21 @@ sys.path.append(os.path.join(os.getcwd()))
 
 warnings.filterwarnings("ignore", message="xFormers is not available*")
 
-from configs.config import config as cfg
-from backbones import get_model
-from data.transform import transform_image
+from config.vit_b import config as cfg
+from backbone import get_model
+from utils.transform import transform_image
 from utils.evaluation import CallBackVerification
 #from utils.evaluation import CallBackVerificationBias
 from utils.utils_logging import init_logging
-from finetuning import apply_lora_model
-from utils.evaluate_cifar import evaluate_model
-from utils.validate_tinyface import tinyface_eval
-from utils.validate_mad import mad_eval
-from utils.validate_pad import pad_eval
-from utils.evaluate_bfw import evaluate_model_bfw_csv
+#from finetuning import apply_lora_model
+#from utils.evaluate_cifar import evaluate_model
+#from utils.validate_tinyface import tinyface_eval
+#from utils.validate_mad import mad_eval
+#from utils.validate_pad import pad_eval
+#from utils.evaluate_bfw import evaluate_model_bfw_csv
 # from utils.validate_ijbs import ijbs_eval
 # from utils.validate_scface import scface_eval
-from utils.validate_ijb import ijb_eval
+#from utils.validate_ijb import ijb_eval
 
 
 def load_model(local_rank):
@@ -42,8 +42,8 @@ def load_model(local_rank):
     model = get_model(local_rank, **cfg)
 
     # Attach LoRA layers
-    if cfg.use_lora:
-        apply_lora_model(local_rank, model, **cfg)
+    #if cfg.use_lora:
+    #    apply_lora_model(local_rank, model, **cfg)
 
     # Load Trained model
     if cfg.model_path is not None:
@@ -54,12 +54,12 @@ def load_model(local_rank):
                                             find_unused_parameters=False)
         elif cfg.model_name == "vit_finetune":
             print("Loading model from path: " + cfg.model_path)
-            checkpoint = torch.load(cfg.model_path)
+            checkpoint = torch.load(cfg.model_path, map_location=torch.device('cpu'))
             state_dict = checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint
             new_state_dict = {k.replace("net.", ""): v for k, v in state_dict.items()}
             model.load_state_dict(new_state_dict)
-            model = DistributedDataParallel(module=model, broadcast_buffers=False, device_ids=[local_rank],
-                                            find_unused_parameters=False)
+            #model = DistributedDataParallel(module=model, broadcast_buffers=False, device_ids=[local_rank],
+            #                                find_unused_parameters=False)
         elif cfg.model_name == "onnx":
             class ONNXModelWrapper(torch.nn.Module):
                 def __init__(self, onnx_path: str, device: str = "cpu"):
@@ -100,9 +100,9 @@ def load_model(local_rank):
 
 
 def evaluate(args):
-    dist.init_process_group(backend='nccl', init_method='env://', timeout=timedelta(seconds=7200000))
+    #dist.init_process_group(backend='nccl', init_method='env://', timeout=timedelta(seconds=7200000))
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
-    torch.cuda.set_device(local_rank)
+    #torch.cuda.set_device()
 
     if not os.path.exists(cfg.output) and local_rank == 0:
         os.makedirs(cfg.output)
@@ -169,7 +169,7 @@ def evaluate(args):
             print(results)
         else:
             callback_verification(4, model)
-
+    """
     if "BiasText" in cfg.eval_type:
         logging.info("--- BiasText Evaluation ---")
         callback_verification = CallBackVerificationBias(
@@ -313,6 +313,8 @@ def evaluate(args):
                                               output_as_string=True,
                                               output_precision=4)
         print("FLOPs:%s   MACs:%s   Params:%s \n" % (flops, macs, params))
+        
+    """
 
 
 if __name__ == "__main__":
