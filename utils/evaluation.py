@@ -6,7 +6,7 @@ import time
 from typing import List
 
 import torch
-#import mxnet as mx
+import mxnet as mx
 import numpy as np
 import sklearn
 import cv2
@@ -234,45 +234,31 @@ def load_bin(path, image_size, transform):
     try:
         with open(path, 'rb') as f:
             bins, issame_list = pickle.load(f)  # py2
-    except UnicodeDecodeError:
+    except UnicodeDecodeError as e:
         with open(path, 'rb') as f:
             bins, issame_list = pickle.load(f, encoding='bytes')  # py3
-
     data_list = []
     for flip in [0, 1]:
         data = torch.empty((len(issame_list) * 2, 3, image_size[0], image_size[1]))
         data_list.append(data)
-
     for idx in range(len(issame_list) * 2):
         _bin = bins[idx]
-
-        # mx.image.imdecode() returns RGB; cv2.imdecode() returns BGR by
-        # default, so convert to keep the channel order `transform` expects.
-        img_bgr = cv2.imdecode(np.frombuffer(_bin, dtype=np.uint8), cv2.IMREAD_COLOR)
-        img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-
-        # Equivalent to mx.image.resize_short(img, image_size[0]): resize so
-        # the shorter side matches image_size[0], preserving aspect ratio.
+        img = mx.image.imdecode(_bin)
         if img.shape[1] != image_size[0]:
-            h, w = img.shape[:2]
-            short_side = min(h, w)
-            scale = image_size[0] / short_side
-            new_w, new_h = round(w * scale), round(h * scale)
-            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            img = mx.image.resize_short(img, image_size[0])
 
-        # `transform` is expected to take an HWC uint8 RGB numpy array (same
-        # as before, when it received img.asnumpy()) and return a CHW tensor.
-        out = transform(img)
-        img_tensor = out if isinstance(out, torch.Tensor) else torch.from_numpy(np.ascontiguousarray(out))
+        img = transform(img.asnumpy())
+        img = mx.nd.array(img)
+        # img = nd.transpose(img, axes=(2, 0, 1)) # TODO
 
         for flip in [0, 1]:
             if flip == 1:
-                img_tensor = torch.flip(img_tensor, dims=[2])  # horizontal flip on CHW (C,H,W)
-            data_list[flip][idx][:] = img_tensor
-
+                img = mx.ndarray.flip(data=img, axis=2)
+            data_list[flip][idx][:] = torch.from_numpy(img.asnumpy())
         if idx % 1000 == 0:
+            #print('loading bin', idx)
             pass
-
+    #print(data_list[0].shape)
     return data_list, issame_list
 
 

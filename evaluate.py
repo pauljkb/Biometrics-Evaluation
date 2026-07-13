@@ -58,8 +58,9 @@ def load_model(local_rank):
             state_dict = checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint
             new_state_dict = {k.replace("net.", ""): v for k, v in state_dict.items()}
             model.load_state_dict(new_state_dict)
-            #model = DistributedDataParallel(module=model, broadcast_buffers=False, device_ids=[local_rank],
-            #                                find_unused_parameters=False)
+            model.to(local_rank)
+            model = DistributedDataParallel(module=model, broadcast_buffers=False, device_ids=[local_rank],
+                                            find_unused_parameters=False)
         elif cfg.model_name == "onnx":
             class ONNXModelWrapper(torch.nn.Module):
                 def __init__(self, onnx_path: str, device: str = "cpu"):
@@ -132,12 +133,17 @@ def evaluate(args):
             5, local_rank, cfg.val_targets_fr, cfg.eval_path,
             cfg.image_size, transform, cfg.batch_size_eval, cfg.model_name)
 
+        result = callback_verification(4, model)
+        print(result)
+
+        
+
         if cfg.model_folder is not None:
             def extract_number(path):
                 match = re.search(r'/(\d+)backbone\.pth$', path)
                 return int(match.group(1)) if match else -1
 
-            model_paths = glob.glob(os.path.join(cfg.model_folder, "*.pth"))
+            model_paths = glob.glob(os.path.join(cfg.model_folder, "*.pt"))
             model_paths = [path for path in model_paths if "header" not in os.path.basename(
                 path).lower()]  # Filter out files that contain "header" in the name
             model_paths = sorted(model_paths, key=extract_number)
@@ -168,7 +174,8 @@ def evaluate(args):
             print(len(results))
             print(results)
         else:
-            callback_verification(4, model)
+            result = callback_verification(4, model)
+            print(result)
     """
     if "BiasText" in cfg.eval_type:
         logging.info("--- BiasText Evaluation ---")
@@ -323,4 +330,10 @@ if __name__ == "__main__":
     parser.add_argument('--debug', default=False, type=bool, help='Log additional debug informations')
     args = parser.parse_args()
 
-    evaluate(args)
+    torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
+    acc = torch.accelerator.current_accelerator()
+    backend = torch.distributed.get_default_backend_for_device(acc)
+    dist.init_process_group(backend)
+    rank = dist.get_rank()
+    evaluate(rank)
+    dist.destroy_process_group()
