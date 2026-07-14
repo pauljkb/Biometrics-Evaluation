@@ -62,3 +62,48 @@ def transform_image(image_size, normalize_type="imagenet", interpolation_type="b
         return tensor
 
     return transform
+
+
+import torch
+
+def normalize_image(imgs: torch.Tensor, image_size: int, normalize_type: str) -> torch.Tensor:
+    """
+    Normalize a batch of images that are already scaled to [0, 1].
+
+    Args:
+        imgs: Tensor of shape (N, C, H, W), values in [0, 1].
+        image_size: Expected spatial size (H == W == image_size). Used only
+            for a sanity check here, since resizing should already have
+            happened upstream (e.g. via warpAffine or a Resize transform).
+        normalize_type: One of:
+            "01"        -> leave values in [0, 1], no further normalization.
+            "-1_1"      -> rescale [0, 1] to [-1, 1]  (x - 0.5) / 0.5
+            "imagenet"  -> standard ImageNet mean/std normalization.
+
+    Returns:
+        Normalized tensor, same shape as input.
+    """
+    if imgs.dim() != 4:
+        raise ValueError(f"Expected imgs of shape (N, C, H, W), got {imgs.shape}")
+
+    if imgs.shape[-1] != image_size or imgs.shape[-2] != image_size:
+        raise ValueError(
+            f"Expected spatial size {image_size}x{image_size}, "
+            f"got {imgs.shape[-2]}x{imgs.shape[-1]}"
+        )
+
+    if normalize_type == "01":
+        # Already in [0, 1] — no-op.
+        return imgs
+
+    elif normalize_type in ("-1_1", "neg1_1"):
+        # Rescale [0, 1] -> [-1, 1]
+        return imgs.sub(0.5).div(0.5)
+
+    elif normalize_type == "imagenet":
+        mean = torch.tensor([0.485, 0.456, 0.406], device=imgs.device).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], device=imgs.device).view(1, 3, 1, 1)
+        return imgs.sub(mean).div(std)
+
+    else:
+        raise ValueError(f"Unknown normalize_type: {normalize_type}")

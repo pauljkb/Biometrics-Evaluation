@@ -1,10 +1,11 @@
+# coding: utf-8
+
 import os
-import time
-import sys
-import warnings
 import pickle
+
 import matplotlib
 import pandas as pd
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import timeit
@@ -13,31 +14,53 @@ import argparse
 import cv2
 import numpy as np
 import torch
-import logging
-
-from sklearn.metrics import roc_curve, auc
 from skimage import transform as trans
+from backbone import get_model
+from sklearn.metrics import roc_curve, auc
+
 from menpo.visualize.viewmatplotlib import sample_colours_from_colourmap
 from prettytable import PrettyTable
 from pathlib import Path
-from torchvision import transforms
 
-from backbone import get_model, get_output_dim
-from config.vit_b import config as cfg
-#from finetuning import apply_lora_model
-from utils.transform import normalize_image
-from torchvision import transforms
+import sys
+import warnings
 
 sys.path.insert(0, "../")
 warnings.filterwarnings("ignore")
 
-class Embedding(object):
-    def __init__(self, rank, model, data_shape, image_size, batch_size=1):
-        local_rank = f"cuda:{rank}"
-        self.image_size = (image_size, image_size)
-        self.model = model
+parser = argparse.ArgumentParser(description='do ijb test')
+# general
+parser.add_argument('--model-prefix', default='', help='path to load model.')
+parser.add_argument('--image-path', default='', type=str, help='')
+parser.add_argument('--result-dir', default='.', type=str, help='')
+parser.add_argument('--batch-size', default=128, type=int, help='')
+parser.add_argument('--network', default='iresnet50', type=str, help='')
+parser.add_argument('--job', default='insightface', type=str, help='job name')
+parser.add_argument('--target', default='IJBC', type=str, help='target, set to IJBC or IJBB')
+args = parser.parse_args()
 
-        scale = image_size / 112.0
+target = args.target
+model_path = args.model_prefix
+image_path = args.image_path
+result_dir = args.result_dir
+gpu_id = None
+use_norm_score = True  # if Ture, TestMode(N1)
+use_detector_score = True  # if Ture, TestMode(D1)
+use_flip_test = True  # if Ture, TestMode(F1)
+job = args.job
+batch_size = args.batch_size
+
+
+class Embedding(object):
+    def __init__(self, prefix, data_shape, batch_size=1):
+        image_size = (112, 112)
+        self.image_size = image_size
+        weight = torch.load(prefix)
+        resnet = get_model(args.network, dropout=0, fp16=False).cuda()
+        resnet.load_state_dict(weight)
+        model = torch.nn.DataParallel(resnet)
+        self.model = model
+        self.model.eval()
         src = np.array([
             [30.2946, 51.6963],
             [65.5318, 51.5014],
@@ -45,12 +68,12 @@ class Embedding(object):
             [33.5493, 92.3655],
             [62.7299, 92.2041]], dtype=np.float32)
         src[:, 0] += 8.0
-        src *= scale 
         self.src = src
         self.batch_size = batch_size
         self.data_shape = data_shape
 
     def get(self, rimg, landmark):
+
         assert landmark.shape[0] == 68 or landmark.shape[0] == 5
         assert landmark.shape[1] == 2
         if landmark.shape[0] == 68:
@@ -68,11 +91,9 @@ class Embedding(object):
         img = cv2.warpAffine(rimg,
                              M, (self.image_size[1], self.image_size[0]),
                              borderValue=0.0)
-        #img = cv2.resize(rimg, self.image_size)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img_flip = np.fliplr(img)
-        img = np.transpose(img, (2, 0, 1))
-
+        img = np.transpose(img, (2, 0, 1))  # 3*112*112, RGB
         img_flip = np.transpose(img_flip, (2, 0, 1))
         input_blob = np.zeros((2, 3, self.image_size[1], self.image_size[0]), dtype=np.uint8)
         input_blob[0] = img
@@ -82,15 +103,13 @@ class Embedding(object):
     @torch.no_grad()
     def forward_db(self, batch_data):
         imgs = torch.Tensor(batch_data).cuda()
-        # imgs = normalize_image(imgs, image_size, cfg.normalize_type)
-        #imgs.div_(255).sub_(0.5).div_(0.5)
-        imgs.div_(255)
-        imgs = normalize_image(imgs, cfg.image_size, cfg.normalize_type)
+        imgs.div_(255).sub_(0.5).div_(0.5)
         feat = self.model(imgs)
         feat = feat.reshape([self.batch_size, 2 * feat.shape[1]])
         return feat.cpu().numpy()
 
 
+# 将一个list尽量均分成n份，限制len(list)==n，份数大于原list内元素个数则分配空list[]
 def divideIntoNstrand(listTemp, n):
     twoList = [[] for i in range(n)]
     for i, e in enumerate(listTemp):
@@ -106,6 +125,9 @@ def read_template_media_list(path):
     return templates, medias
 
 
+# In[ ]:
+
+
 def read_template_pair_list(path):
     # pairs = np.loadtxt(path, dtype=str)
     pairs = pd.read_csv(path, sep=' ', header=None).values
@@ -117,25 +139,31 @@ def read_template_pair_list(path):
     return t1, t2, label
 
 
+# In[ ]:
+
+
 def read_image_feature(path):
     with open(path, 'rb') as fid:
         img_feats = pickle.load(fid)
     return img_feats
 
 
-def get_image_feature(img_path, files_list, model, epoch, rank, image_size, embedding_size, batch_size):
-    data_shape = (3, image_size, image_size)
+# In[ ]:
+
+
+def get_image_feature(img_path, files_list, model_path, epoch, gpu_id):
+    batch_size = args.batch_size
+    data_shape = (3, 112, 112)
 
     files = files_list
     print('files:', len(files))
     rare_size = len(files) % batch_size
     faceness_scores = []
     batch = 0
-    embedding_size = embedding_size # replaced 256 -> cfg.embedding_size*2
-    img_feats = np.empty((len(files), embedding_size*2), dtype=np.float32)
-    
-    batch_data = np.empty((2 * batch_size, 3, image_size, image_size))
-    embedding = Embedding(rank, model, data_shape, image_size, batch_size)
+    img_feats = np.empty((len(files), 1024), dtype=np.float32)
+
+    batch_data = np.empty((2 * batch_size, 3, 112, 112))
+    embedding = Embedding(model_path, data_shape, batch_size)
     for img_index, each_line in enumerate(files[:len(files) - rare_size]):
         name_lmk_score = each_line.strip().split(' ')
         img_name = os.path.join(img_path, name_lmk_score[0])
@@ -154,8 +182,8 @@ def get_image_feature(img_path, files_list, model, epoch, rank, image_size, embe
             batch += 1
         faceness_scores.append(name_lmk_score[-1])
 
-    batch_data = np.empty((2 * rare_size, 3, image_size, image_size))
-    embedding = Embedding(rank, model, data_shape, image_size, rare_size)
+    batch_data = np.empty((2 * rare_size, 3, 112, 112))
+    embedding = Embedding(model_path, data_shape, rare_size)
     for img_index, each_line in enumerate(files[len(files) - rare_size:]):
         name_lmk_score = each_line.strip().split(' ')
         img_name = os.path.join(img_path, name_lmk_score[0])
@@ -172,11 +200,13 @@ def get_image_feature(img_path, files_list, model, epoch, rank, image_size, embe
                       rare_size:][:] = embedding.forward_db(batch_data)
             batch += 1
         faceness_scores.append(name_lmk_score[-1])
-
     faceness_scores = np.array(faceness_scores).astype(np.float32)
     # img_feats = np.ones( (len(files), 1024), dtype=np.float32) * 0.01
     # faceness_scores = np.ones( (len(files), ), dtype=np.float32 )
     return img_feats, faceness_scores
+
+
+# In[ ]:
 
 
 def image2template_feature(img_feats=None, templates=None, medias=None):
@@ -216,6 +246,9 @@ def image2template_feature(img_feats=None, templates=None, medias=None):
     return template_norm_feats, unique_templates
 
 
+# In[ ]:
+
+
 def verification(template_norm_feats=None,
                  unique_templates=None,
                  p1=None,
@@ -245,6 +278,7 @@ def verification(template_norm_feats=None,
     return score
 
 
+# In[ ]:
 def verification2(template_norm_feats=None,
                   unique_templates=None,
                   p1=None,
@@ -274,167 +308,176 @@ def read_score(path):
         img_feats = pickle.load(fid)
     return img_feats
 
-def ijb_eval(rank, model, target, eval_path, **kwargs):
-    target = target
-    eval_desc = kwargs["eval_desc"]
-    batch_size = kwargs["batch_size_eval"]
-    image_size = kwargs["image_size"]
-    image_path = eval_path
-    use_flip_test = kwargs["use_flip_test"]
-    use_detector_score = kwargs["use_detector_score"]
-    use_norm_score = kwargs["use_norm_score"]
-    result_dir = kwargs["output"]
 
-    ###### Step1: Load Meta Data ######
-    print("Step1: Load Meta Data for " + str(target))
-    assert target == "IJBC" or target == "IJBB"
+# # Step1: Load Meta Data
 
-    # =============================================================
-    # load image and template relationships for template feature embedding
-    # tid --> template id,  mid --> media id ; format image_name tid mid
-    # =============================================================
-    start = timeit.default_timer()
-    templates, medias = read_template_media_list(os.path.join('%s/meta' % image_path, '%s_face_tid_mid.txt' % target.lower()))
-    stop = timeit.default_timer()
-    print('Time: %.2f s. ' % (stop - start))
+# In[ ]:
 
-    # =============================================================
-    # load template pairs for template-to-template verification
-    # tid : template id,  label : 1/0 ; format: tid_1 tid_2 label
-    # =============================================================
-    start = timeit.default_timer()
-    p1, p2, label = read_template_pair_list(os.path.join('%s/meta' % image_path, '%s_template_pair_label.txt' % target.lower()))
-    stop = timeit.default_timer()
-    print('Time: %.2f s. ' % (stop - start))
+assert target == 'IJBC' or target == 'IJBB'
 
-    ###### Step 2: Get Image Features ######
-    # =============================================================
-    # load image features ; format: img_feats: [image_num x feats_dim] (227630, 512)
-    # =============================================================
-    print("Step 2: Get Image Features")
-    start = timeit.default_timer()
-    img_path = '%s/loose_crop' % image_path
-    img_list_path = '%s/meta/%s_name_5pts_score.txt' % (image_path, target.lower())
-    img_list = open(img_list_path)
-    files = img_list.readlines()
-    # files_list = divideIntoNstrand(files, rank_size)
-    files_list = files
+# =============================================================
+# load image and template relationships for template feature embedding
+# tid --> template id,  mid --> media id
+# format:
+#           image_name tid mid
+# =============================================================
+start = timeit.default_timer()
+templates, medias = read_template_media_list(
+    os.path.join('%s/meta' % image_path,
+                 '%s_face_tid_mid.txt' % target.lower()))
+stop = timeit.default_timer()
+print('Time: %.2f s. ' % (stop - start))
 
-    # img_feats
-    # for i in range(rank_size):
-    output_dim = get_output_dim(**cfg)
-    img_feats, faceness_scores = get_image_feature(img_path, files_list, model, 0, rank, image_size, output_dim, batch_size)
-    stop = timeit.default_timer()
-    print('Time: %.2f s. ' % (stop - start))
-    print('Feature Shape: ({} , {}) .'.format(img_feats.shape[0], img_feats.shape[1]))
+# In[ ]:
 
-    ###### Step3: Get Template Features ######
-    # =============================================================
-    # compute template features from image features.
-    # =============================================================
-    # ==========================================================
-    # Norm feature before aggregation into template feature?
-    # Feature norm from embedding network and faceness score are able to decrease weights for noise samples (not face).
-    # ==========================================================
-    # 1. FaceScore （Feature Norm）
-    # 2. FaceScore （Detector）
-    print("Step3: Get Template Features")
-    start = timeit.default_timer()
-    if use_flip_test:
-        # concat --- F1
-        # img_input_feats = img_feats
-        # add --- F2
-        img_input_feats = img_feats[:, 0:img_feats.shape[1] //
-                                        2] + img_feats[:, img_feats.shape[1] // 2:]
-    else:
-        img_input_feats = img_feats[:, 0:img_feats.shape[1] // 2]
+# =============================================================
+# load template pairs for template-to-template verification
+# tid : template id,  label : 1/0
+# format:
+#           tid_1 tid_2 label
+# =============================================================
+start = timeit.default_timer()
+p1, p2, label = read_template_pair_list(
+    os.path.join('%s/meta' % image_path,
+                 '%s_template_pair_label.txt' % target.lower()))
+stop = timeit.default_timer()
+print('Time: %.2f s. ' % (stop - start))
 
-    if use_norm_score:
-        img_input_feats = img_input_feats
-    else:
-        # normalise features to remove norm information
-        img_input_feats = img_input_feats / np.sqrt(
-            np.sum(img_input_feats ** 2, -1, keepdims=True))
+# # Step 2: Get Image Features
 
-    if use_detector_score:
-        print(img_input_feats.shape, faceness_scores.shape)
-        img_input_feats = img_input_feats * faceness_scores[:, np.newaxis]
-    else:
-        img_input_feats = img_input_feats
+# In[ ]:
 
-    save_path = os.path.join(result_dir, eval_desc)
-    # save_path = result_dir + '/%s_result' % target
+# =============================================================
+# load image features
+# format:
+#           img_feats: [image_num x feats_dim] (227630, 512)
+# =============================================================
+start = timeit.default_timer()
+img_path = '%s/loose_crop' % image_path
+img_list_path = '%s/meta/%s_name_5pts_score.txt' % (image_path, target.lower())
+img_list = open(img_list_path)
+files = img_list.readlines()
+# files_list = divideIntoNstrand(files, rank_size)
+files_list = files
 
-    if not os.path.exists(save_path):
-        os.makedirs(save_path)
+# img_feats
+# for i in range(rank_size):
+img_feats, faceness_scores = get_image_feature(img_path, files_list,
+                                               model_path, 0, gpu_id)
+stop = timeit.default_timer()
+print('Time: %.2f s. ' % (stop - start))
+print('Feature Shape: ({} , {}) .'.format(img_feats.shape[0],
+                                          img_feats.shape[1]))
 
-    score_save_file = os.path.join(save_path, "%s.npy" % target.lower())
-    tempalte_svae_file= os.path.join(save_path, "%s.npy" % ""+target.lower())
-    np.save(tempalte_svae_file, img_input_feats)
+# # Step3: Get Template Features
 
-    template_norm_feats, unique_templates = image2template_feature(
-        img_input_feats, templates, medias)
-    stop = timeit.default_timer()
-    print('Time: %.2f s. ' % (stop - start))
+# In[ ]:
 
-    ###### Step 4: Get Template Similarity Scores ######
-    # =============================================================
-    # compute verification scores between template pairs.
-    # =============================================================
-    print("Step4: Get Template Similarity Scores")
-    start = timeit.default_timer()
-    score = verification(template_norm_feats, unique_templates, p1, p2)
-    stop = timeit.default_timer()
-    print('Time: %.2f s. ' % (stop - start))
-    np.save(score_save_file, score)
+# =============================================================
+# compute template features from image features.
+# =============================================================
+start = timeit.default_timer()
+# ==========================================================
+# Norm feature before aggregation into template feature?
+# Feature norm from embedding network and faceness score are able to decrease weights for noise samples (not face).
+# ==========================================================
+# 1. FaceScore （Feature Norm）
+# 2. FaceScore （Detector）
 
-     ###### Step 5: Get ROC Curves and TPR@FPR Table
-    # =============================================================
-    print("Step5: Get ROC Curves and TPR@FPR Table")
-    files = [score_save_file]
-    methods = []
-    scores = []
-    for file in files:
-        methods.append(Path(file).stem)
-        scores.append(np.load(file))
+if use_flip_test:
+    # concat --- F1
+    # img_input_feats = img_feats
+    # add --- F2
+    img_input_feats = img_feats[:, 0:img_feats.shape[1] //
+                                     2] + img_feats[:, img_feats.shape[1] // 2:]
+else:
+    img_input_feats = img_feats[:, 0:img_feats.shape[1] // 2]
 
-    methods = np.array(methods)
-    scores = dict(zip(methods, scores))
-    colours = dict(
-        zip(methods, sample_colours_from_colourmap(methods.shape[0], 'Set2')))
-    x_labels = [10 ** -6, 10 ** -5, 10 ** -4, 10 ** -3, 10 ** -2, 10 ** -1]
-    tpr_fpr_table = PrettyTable(['Methods'] + [str(x) for x in x_labels])
-    fig = plt.figure()
-    for method in methods:
-        fpr, tpr, _ = roc_curve(label, scores[method])
-        roc_auc = auc(fpr, tpr)
-        fpr = np.flipud(fpr)
-        tpr = np.flipud(tpr)  # select largest tpr at same fpr
-        plt.plot(fpr,
-                tpr,
-                color=colours[method],
-                lw=1,
-                label=('[%s (AUC = %0.4f %%)]' %
-                        (method.split('-')[-1], roc_auc * 100)))
-        tpr_fpr_row = []
-        tpr_fpr_row.append("%s-%s" % (method, target))
-        for fpr_iter in np.arange(len(x_labels)):
-            _, min_index = min(
-                list(zip(abs(fpr - x_labels[fpr_iter]), range(len(fpr)))))
-            tpr_fpr_row.append('%.2f' % (tpr[min_index] * 100))
-        tpr_fpr_table.add_row(tpr_fpr_row)
-    plt.xlim([10 ** -6, 0.1])
-    plt.ylim([0.3, 1.0])
-    plt.grid(linestyle='--', linewidth=1)
-    plt.xticks(x_labels)
-    plt.yticks(np.linspace(0.3, 1.0, 8, endpoint=True))
-    plt.xscale('log')
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title('ROC on IJB')
-    plt.legend(loc="lower right")
-    fig.savefig(os.path.join(save_path, '%s.pdf' % target.lower()))
-    logging.info(tpr_fpr_table)
-    with open(os.path.join(save_path, '%s.txt' % target.lower()), 'w') as f:
-        f.write(str(tpr_fpr_table))
+if use_norm_score:
+    img_input_feats = img_input_feats
+else:
+    # normalise features to remove norm information
+    img_input_feats = img_input_feats / np.sqrt(
+        np.sum(img_input_feats ** 2, -1, keepdims=True))
 
+if use_detector_score:
+    print(img_input_feats.shape, faceness_scores.shape)
+    img_input_feats = img_input_feats * faceness_scores[:, np.newaxis]
+else:
+    img_input_feats = img_input_feats
+
+template_norm_feats, unique_templates = image2template_feature(
+    img_input_feats, templates, medias)
+stop = timeit.default_timer()
+print('Time: %.2f s. ' % (stop - start))
+
+# # Step 4: Get Template Similarity Scores
+
+# In[ ]:
+
+# =============================================================
+# compute verification scores between template pairs.
+# =============================================================
+start = timeit.default_timer()
+score = verification(template_norm_feats, unique_templates, p1, p2)
+stop = timeit.default_timer()
+print('Time: %.2f s. ' % (stop - start))
+
+# In[ ]:
+save_path = os.path.join(result_dir, args.job)
+# save_path = result_dir + '/%s_result' % target
+
+if not os.path.exists(save_path):
+    os.makedirs(save_path)
+
+score_save_file = os.path.join(save_path, "%s.npy" % target.lower())
+np.save(score_save_file, score)
+
+# # Step 5: Get ROC Curves and TPR@FPR Table
+
+# In[ ]:
+
+files = [score_save_file]
+methods = []
+scores = []
+for file in files:
+    methods.append(Path(file).stem)
+    scores.append(np.load(file))
+
+methods = np.array(methods)
+scores = dict(zip(methods, scores))
+colours = dict(
+    zip(methods, sample_colours_from_colourmap(methods.shape[0], 'Set2')))
+x_labels = [10 ** -6, 10 ** -5, 10 ** -4, 10 ** -3, 10 ** -2, 10 ** -1]
+tpr_fpr_table = PrettyTable(['Methods'] + [str(x) for x in x_labels])
+fig = plt.figure()
+for method in methods:
+    fpr, tpr, _ = roc_curve(label, scores[method])
+    roc_auc = auc(fpr, tpr)
+    fpr = np.flipud(fpr)
+    tpr = np.flipud(tpr)  # select largest tpr at same fpr
+    plt.plot(fpr,
+             tpr,
+             color=colours[method],
+             lw=1,
+             label=('[%s (AUC = %0.4f %%)]' %
+                    (method.split('-')[-1], roc_auc * 100)))
+    tpr_fpr_row = []
+    tpr_fpr_row.append("%s-%s" % (method, target))
+    for fpr_iter in np.arange(len(x_labels)):
+        _, min_index = min(
+            list(zip(abs(fpr - x_labels[fpr_iter]), range(len(fpr)))))
+        tpr_fpr_row.append('%.2f' % (tpr[min_index] * 100))
+    tpr_fpr_table.add_row(tpr_fpr_row)
+plt.xlim([10 ** -6, 0.1])
+plt.ylim([0.3, 1.0])
+plt.grid(linestyle='--', linewidth=1)
+plt.xticks(x_labels)
+plt.yticks(np.linspace(0.3, 1.0, 8, endpoint=True))
+plt.xscale('log')
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('ROC on IJB')
+plt.legend(loc="lower right")
+fig.savefig(os.path.join(save_path, '%s.pdf' % target.lower()))
+print(tpr_fpr_table)

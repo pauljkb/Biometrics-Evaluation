@@ -34,7 +34,7 @@ from utils.utils_logging import init_logging
 #from utils.evaluate_bfw import evaluate_model_bfw_csv
 # from utils.validate_ijbs import ijbs_eval
 # from utils.validate_scface import scface_eval
-#from utils.validate_ijb import ijb_eval
+from utils.validate_ijb import ijb_eval
 
 
 def load_model(local_rank):

@@ -28,16 +28,16 @@ class TinyFaceTest:
         self.proto_distractor_paths = get_all_files(os.path.join(tinyface_root, alignment_dir_name, 'Gallery_Distractor'))
 
         self.image_paths = get_all_files(os.path.join(tinyface_root, alignment_dir_name))
-        self.image_paths = np.array(self.image_paths).astype(np.object).flatten()
+        self.image_paths = np.array(self.image_paths).astype(object).flatten()
 
         self.probe_paths = get_all_files(os.path.join(tinyface_root, 'tinyface/Testing_Set/Probe'))
-        self.probe_paths = np.array(self.probe_paths).astype(np.object).flatten()
+        self.probe_paths = np.array(self.probe_paths).astype(object).flatten()
 
         self.gallery_paths = get_all_files(os.path.join(tinyface_root, 'tinyface/Testing_Set/Gallery_Match'))
-        self.gallery_paths = np.array(self.gallery_paths).astype(np.object).flatten()
+        self.gallery_paths = np.array(self.gallery_paths).astype(object).flatten()
 
         self.distractor_paths = get_all_files(os.path.join(tinyface_root, 'tinyface/Testing_Set/Gallery_Distractor'))
-        self.distractor_paths = np.array(self.distractor_paths).astype(np.object).flatten()
+        self.distractor_paths = np.array(self.distractor_paths).astype(object).flatten()
 
         self.init_proto(self.probe_paths, self.gallery_paths, self.distractor_paths)
 

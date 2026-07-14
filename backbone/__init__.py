@@ -4,7 +4,7 @@ from .mobilefacenet import get_mbf
 
 def get_model(name, **kwargs):
     # resnet
-    name = kwargs["network"]
+    #name = kwargs["network"]
     if name == "r18":
         return iresnet18(False, **kwargs)
     elif name == "r34":
@@ -65,7 +65,7 @@ def get_model(name, **kwargs):
     elif name == "vit_b":
         # this is a feature
         num_features = kwargs.get("num_features", 512)
-        num_register_token = kwargs.get("num_register_token", 0)
+        num_register_token = kwargs.get("num_register_token", 8) # TODO fix kwargs pass, default should be 0
         from .vit import VisionTransformer
         return VisionTransformer(
             img_size=112, patch_size=9, num_classes=num_features, embed_dim=512, depth=24,
@@ -99,3 +99,6 @@ def get_model(name, **kwargs):
 
     else:
         raise ValueError()
+    
+def get_output_dim(**kwargs):
+    return kwargs.get("num_features", kwargs.get("embedding_size", 512))

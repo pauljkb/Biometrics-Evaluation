@@ -39,3 +39,26 @@ def init_logging(rank, models_root):
         log_root.addHandler(handler_file)
         log_root.addHandler(handler_stream)
         log_root.info('rank_id: %d' % rank)
+
+
+def init_eval_logging(rank, models_root, logfile="eval.log"):
+    log_root = logging.getLogger()
+
+    if rank == 0:
+        log_root.setLevel(logging.INFO)
+        log_root.handlers.clear()
+        formatter = logging.Formatter("Eval: %(asctime)s-%(message)s")
+
+        handler_file = logging.FileHandler(os.path.join(models_root, logfile))
+        handler_file.setFormatter(formatter)
+        log_root.addHandler(handler_file)
+
+        handler_stream = logging.StreamHandler(sys.stdout)
+        handler_stream.setFormatter(formatter)
+        log_root.addHandler(handler_stream)
+
+        log_root.info('rank_id: %d' % rank)
+    else:
+        log_root.setLevel(logging.ERROR)
+
+    return log_root

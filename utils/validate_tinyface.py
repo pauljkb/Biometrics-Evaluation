@@ -97,7 +97,7 @@ def infer(rank, model, dataloader, use_flip_test, fusion_method):
 
 
 def tinyface_eval(rank, model, **kwargs):
-    data_root = kwargs["eval_path"]
+    data_root = kwargs["tinyface_path"]
     fusion_method = kwargs["fusion_method"]
     training_desc = kwargs["eval_desc"]
     use_flip_test =  kwargs["use_flip_test"]
