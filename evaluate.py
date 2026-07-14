@@ -176,7 +176,7 @@ def evaluate(args):
         else:
             result = callback_verification(4, model)
             print(result)
-    """
+    
     if "BiasText" in cfg.eval_type:
         logging.info("--- BiasText Evaluation ---")
         callback_verification = CallBackVerificationBias(
@@ -321,7 +321,7 @@ def evaluate(args):
                                               output_precision=4)
         print("FLOPs:%s   MACs:%s   Params:%s \n" % (flops, macs, params))
         
-    """
+    
 
 
 if __name__ == "__main__":

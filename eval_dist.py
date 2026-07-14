@@ -24,13 +24,28 @@ from config.vit_b import config as cfg
 from backbone import get_model
 from utils.transform import transform_image
 from utils.evaluation import CallBackVerification
+#from utils.evaluation import CallBackVerificationBias
 from utils.utils_logging import init_logging
+#from finetuning import apply_lora_model
+#from utils.evaluate_cifar import evaluate_model
+#from utils.validate_tinyface import tinyface_eval
+#from utils.validate_mad import mad_eval
+#from utils.validate_pad import pad_eval
+#from utils.evaluate_bfw import evaluate_model_bfw_csv
+# from utils.validate_ijbs import ijbs_eval
+# from utils.validate_scface import scface_eval
+#from utils.validate_ijb import ijb_eval
 
 
 def load_model(local_rank):
     # Load Model
     model = get_model(local_rank, **cfg)
 
+    # Attach LoRA layers
+    #if cfg.use_lora:
+    #    apply_lora_model(local_rank, model, **cfg)
+
+    # Load Trained model
     if cfg.model_path is not None:
         if cfg.model_name == "resnet":
             print("Loading model from path: " + cfg.model_path)
@@ -38,17 +53,15 @@ def load_model(local_rank):
             model = model.to(local_rank)
             model = DistributedDataParallel(module=model, broadcast_buffers=False, device_ids=[local_rank],
                                             find_unused_parameters=False)
-
         elif cfg.model_name == "vit_finetune":
             print("Loading model from path: " + cfg.model_path)
-            checkpoint = torch.load(cfg.model_path, map_location="cpu")
+            checkpoint = torch.load(cfg.model_path, map_location=torch.device('cpu'))
             state_dict = checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint
             new_state_dict = {k.replace("net.", ""): v for k, v in state_dict.items()}
             model.load_state_dict(new_state_dict)
             model = model.to(local_rank)
             model = DistributedDataParallel(module=model, broadcast_buffers=False, device_ids=[local_rank],
                                             find_unused_parameters=False)
-
         elif cfg.model_name == "onnx":
             class ONNXModelWrapper(torch.nn.Module):
                 def __init__(self, onnx_path: str, device: str = "cpu"):
@@ -72,10 +85,10 @@ def load_model(local_rank):
                     return torch.from_numpy(output).to(self.device)
 
             print("Loading ONNX model from path: " + cfg.model_path)
-            # ONNXRuntime uses its own CUDA device selection, not torch DDP.
+            # NOTE: ONNXRuntime manages its own CUDA device selection separately
+            # from torch DDP; bind it to this process's assigned GPU.
             model = ONNXModelWrapper(cfg.model_path, device=f"cuda:{local_rank}")
             model.eval()
-
         else:
             print("Loading model from path: " + cfg.model_path)
             model.backbone.load_state_dict(torch.load(cfg.model_path, map_location="cpu"))
@@ -96,7 +109,7 @@ def evaluate(local_rank):
     if not os.path.exists(cfg.output) and local_rank == 0:
         os.makedirs(cfg.output)
 
-    # Make sure rank 0 has created the dir before others might rely on it (e.g. logging)
+    # Make sure non-zero ranks don't race ahead before rank 0 creates cfg.output
     dist.barrier()
 
     if cfg.log_eval:
@@ -128,7 +141,195 @@ def evaluate(local_rank):
         if local_rank == 0:
             print(result)
 
-    # (other eval_type branches unchanged, omitted here for brevity — keep as in your original)
+        if cfg.model_folder is not None:
+            def extract_number(path):
+                match = re.search(r'/(\d+)backbone\.pth$', path)
+                return int(match.group(1)) if match else -1
+
+            model_paths = glob.glob(os.path.join(cfg.model_folder, "*.pt"))
+            model_paths = [path for path in model_paths if "header" not in os.path.basename(
+                path).lower()]  # Filter out files that contain "header" in the name
+            model_paths = sorted(model_paths, key=extract_number)
+
+            for model_path in model_paths:
+                cfg.model_path = model_path
+                model = load_model(local_rank)
+                if cfg.model_name == "baseline_insight" and cfg.use_index_token is not None:
+                    results = []
+                    for index in range(model.module.num_patches):
+                        model.module.use_index_token = index
+                        result = callback_verification(4, model)
+                        if local_rank == 0:
+                            result = round(np.mean(list(result.values())) * 100, 2)
+                            results.append(result)
+                    if local_rank == 0:
+                        print(len(results))
+                        print(results)
+                else:
+                    callback_verification(4, model)
+
+        if cfg.model_name == "baseline_insight" and cfg.use_index_token is not None:
+            results = []
+
+            for index in range(model.module.num_patches - model.module.add_register_token):
+                model.module.use_index_token = index
+                result = callback_verification(4, model)
+                if local_rank == 0:
+                    result = round(np.mean(list(result.values())) * 100, 2)
+                    results.append(result)
+            if local_rank == 0:
+                print(len(results))
+                print(results)
+        else:
+            result = callback_verification(4, model)
+            if local_rank == 0:
+                print(result)
+
+    if "BiasText" in cfg.eval_type:
+        logging.info("--- BiasText Evaluation ---")
+        callback_verification = CallBackVerificationBias(
+            5, local_rank, cfg.val_targets_bt, cfg.eval_path,
+            cfg.image_size, transform, cfg.batch_size_eval, cfg.model_name, cfg.fusion_type_bt)
+        callback_verification(4, model)
+
+    if "BFW" in cfg.eval_type:
+        logging.info("--- BFW Evaluation ---")
+        results = evaluate_model_bfw_csv(
+            model=model,
+            transform=transform,
+            csv_path=cfg.csv_path,
+            img_root=cfg.img_root,
+            fusion_type=cfg.fusion_type_bfw,
+            model_name=cfg.model_name,
+        )
+
+    if "TinyFace" in cfg.eval_type:
+        logging.info("--- TinyFace Evaluation ---")
+        if cfg.model_name == "clip":
+            model = model.module.visual
+
+        tinyface_eval(local_rank, model, **cfg)
+
+    if "IJBB" in cfg.eval_type:
+        logging.info("--- IJBB Evaluation ---")
+        if cfg.model_name == "clip":
+            model = model.module.visual
+        ijb_eval(local_rank, model, target="IJBB", **cfg)
+
+    if "IJBC" in cfg.eval_type:
+        logging.info("--- IJBC Evaluation ---")
+        if cfg.model_name == "clip":
+            model = model.module.visual
+        ijb_eval(local_rank, model, target="IJBC", **cfg)
+
+    if "SCface" in cfg.eval_type:
+        pass  # scface_eval(local_rank, model, **cfg)
+
+    if "IJB-S" in cfg.eval_type:
+        pass  # ijbs_eval(local_rank, model, **cfg)
+
+    if "Generate_embeddings" in cfg.eval_type:
+        if not os.path.exists(cfg.output_embeddings_path) and local_rank == 0:
+            os.makedirs(cfg.output_embeddings_path)
+        dist.barrier()
+
+        if cfg.model_name == "clip":
+            model = model.module.visual
+
+        valid_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.gif'}
+        with torch.no_grad():
+            image_paths = []
+            for root, dirs, files in os.walk(cfg.images_path):
+                for file in files:
+                    ext = os.path.splitext(file)[1].lower()
+                    if ext in valid_extensions:
+                        img_path = os.path.join(root, file)
+                        if os.path.isfile(img_path):
+                            image_paths.append(img_path)
+
+            # Shard the image list across ranks so each GPU processes a
+            # distinct subset instead of every rank redundantly processing
+            # the entire dataset.
+            world_size = dist.get_world_size()
+            rank = dist.get_rank()
+            image_paths = image_paths[rank::world_size]
+
+            for img_path in tqdm(image_paths, desc=f"Processing images (rank {rank})"):
+                # read image
+                img = cv2.imread(img_path)
+                if img is None:
+                    print(img_path)
+                    continue
+                img = transform(img).unsqueeze(0).to(local_rank)
+
+                # image embedding
+                embedding = model(img).detach().cpu().squeeze().numpy()
+
+                # save embedding
+                subdir = os.path.basename(os.path.dirname(img_path))  # "005840"
+                filename = os.path.splitext(os.path.basename(img_path))[0]  # "00318924"
+                subdir_path = os.path.join(cfg.output_embeddings_path, subdir)
+                output_path = os.path.join(cfg.output_embeddings_path, subdir, filename)
+                if not os.path.exists(subdir_path):
+                    os.makedirs(subdir_path, exist_ok=True)
+                np.save(output_path, embedding)
+
+    if "General" in cfg.eval_type:
+        evaluate_model(
+            model=model, transform=transform, test_data_list=cfg.test_datasets, batch_size=cfg.batch_size_eval,
+            normalization_type=cfg.cifar_normalization_type, use_open_clip_model=cfg.use_open_clip_model,
+            use_custom_transform=cfg.use_custom_transform, open_clip_variant=cfg.open_clip_variant,
+            linear_probe_evaluation=cfg.linear_probe_evaluation, data_path=cfg.eval_path
+        )
+
+    if "MAD" in cfg.eval_type:
+        mad_eval(
+            model=model, test_data=cfg.test_datasets, test_data_path=cfg.test_data_path, transform=transform,
+            normalization_type=cfg.normalization_type, use_open_clip_model=cfg.use_open_clip_model,
+            header_path=cfg.header_path,
+            batch_size=cfg.batch_size_eval
+        )
+
+    if "PAD" in cfg.eval_type:
+        pad_eval(
+            model=model, test_data=cfg.test_datasets, test_data_path=cfg.test_data_path, transform=transform,
+            normalization_type=cfg.normalization_type, use_open_clip_model=cfg.use_open_clip_model,
+            header_path=cfg.header_path,
+            batch_size=cfg.batch_size_eval
+        )
+
+    if "FLOPS" in cfg.eval_type:
+        if local_rank == 0:
+            input_size = (3, cfg.image_size, cfg.image_size)
+            inputs = torch.randn(1, 3, 112, 112).to(local_rank)
+
+            print("---------------  PTFLOPS  ---------------")
+            from ptflops import get_model_complexity_info
+            macs, params = get_model_complexity_info(
+                model, input_size, as_strings=False,
+                print_per_layer_stat=False, verbose=False
+            )
+            gmacs = macs / (1000 ** 3)
+            print("%.3f GFLOPs" % gmacs)
+            print("%.3f Mparams" % (params / (1000 ** 2)))
+
+            print("---------------  DEEPSPEED  ---------------")
+            from deepspeed.profiling.flops_profiler import get_model_profile
+            flops, macs, params = get_model_profile(
+                model=model,
+                args=(inputs,),
+                print_profile=True,
+                detailed=False,
+                module_depth=-1,
+            )
+
+            print("---------------  calflops  ---------------")
+            from calflops import calculate_flops
+            flops, macs, params = calculate_flops(model=model,
+                                                  input_shape=(1, 3, 112, 112),
+                                                  output_as_string=True,
+                                                  output_precision=4)
+            print("FLOPs:%s   MACs:%s   Params:%s \n" % (flops, macs, params))
 
 
 if __name__ == "__main__":
@@ -139,8 +340,8 @@ if __name__ == "__main__":
 
     local_rank = int(os.environ["LOCAL_RANK"])
 
-    # Bind this process to its assigned GPU BEFORE creating the process group
-    # or moving any tensors — this is what was missing.
+    # Bind this process to its assigned GPU BEFORE creating the process
+    # group or moving any tensors — critical for correct multi-GPU behavior.
     torch.cuda.set_device(local_rank)
 
     acc = torch.accelerator.current_accelerator()

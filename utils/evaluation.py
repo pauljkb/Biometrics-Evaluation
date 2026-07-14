@@ -6,7 +6,7 @@ import time
 from typing import List
 
 import torch
-import mxnet as mx
+#import mxnet as mx
 import numpy as np
 import sklearn
 import cv2
@@ -238,6 +238,9 @@ def test(data_set, backbone, batch_size, nfolds=10):
     return acc1, std1, acc2, std2, _xnorm, embeddings_list
 
 
+import numpy as np
+import cv2
+
 def load_bin(path, image_size, transform):
     image_size = (image_size, image_size)
 
@@ -253,18 +256,41 @@ def load_bin(path, image_size, transform):
         data_list.append(data)
     for idx in range(len(issame_list) * 2):
         _bin = bins[idx]
-        img = mx.image.imdecode(_bin)
-        if img.shape[1] != image_size[0]:
-            img = mx.image.resize_short(img, image_size[0])
 
-        img = transform(img.asnumpy())
-        img = mx.nd.array(img)
-        # img = nd.transpose(img, axes=(2, 0, 1)) # TODO
+        # mx.image.imdecode decodes to RGB; cv2.imdecode gives BGR, so convert.
+        img_bgr = cv2.imdecode(np.frombuffer(_bin, dtype=np.uint8), cv2.IMREAD_COLOR)
+        img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+        # mx.image.resize_short: resizes so the shorter side == image_size[0],
+        # preserving aspect ratio, using bilinear interpolation.
+        if img.shape[0] != image_size[0] and img.shape[1] != image_size[0]:
+            h, w = img.shape[:2]
+            if h < w:
+                new_h = image_size[0]
+                new_w = int(round(w * (image_size[0] / h)))
+            else:
+                new_w = image_size[0]
+                new_h = int(round(h * (image_size[0] / w)))
+            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        elif img.shape[1] != image_size[0]:
+            # matches original check: only resizes based on shape[1] (width)
+            h, w = img.shape[:2]
+            scale = image_size[0] / w
+            new_w = image_size[0]
+            new_h = int(round(h * scale))
+            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+        img = transform(img)  # returns e.g. CHW numpy array or torch tensor
+        img = np.asarray(img)
 
         for flip in [0, 1]:
             if flip == 1:
-                img = mx.ndarray.flip(data=img, axis=2)
-            data_list[flip][idx][:] = torch.from_numpy(img.asnumpy())
+                # original flips axis=2 on the post-transform array (C, H, W),
+                # i.e. flips along the width axis == horizontal flip
+                img_flipped = np.flip(img, axis=2).copy()
+            else:
+                img_flipped = img
+            data_list[flip][idx][:] = torch.from_numpy(img_flipped)
         if idx % 1000 == 0:
             #print('loading bin', idx)
             pass
