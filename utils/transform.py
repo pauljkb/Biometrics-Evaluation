@@ -10,13 +10,31 @@ _INTERPOLATION_MAP = {
     "lanczos": cv2.INTER_LANCZOS4,
 }
 
-# (mean, std) per RGB channel, applied after scaling pixels to [0, 1]
+# (mean, std) per RGB channel, applied after scaling pixels to [0, 1].
+# Shared by both transform_image() and normalize_image() so that a given
+# normalize_type string produces identical results regardless of which
+# function processes the image.
 _NORMALIZE_PRESETS = {
+    "01": ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),                # leave in [0, 1]
+    "-1_1": ((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),               # [0,1] -> [-1,1]
+    "arcface": ((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),            # alias of "-1_1", standard for insightface/arcface backbones
     "imagenet": ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
     "clip": ((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
-    "arcface": ((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),  # maps [0,1] -> [-1,1], standard for insightface/arcface backbones
-    "01": ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),        # scale to [0,1] only, no further normalization
 }
+
+# Extra alias so old callers using "neg1_1" keep working.
+_NORMALIZE_PRESETS["neg1_1"] = _NORMALIZE_PRESETS["-1_1"]
+
+
+def _resolve_mean_std(normalize_type, device=None, dtype=torch.float32):
+    if normalize_type not in _NORMALIZE_PRESETS:
+        raise ValueError(
+            f"Unknown normalize_type '{normalize_type}'. Choose from: {sorted(_NORMALIZE_PRESETS)}"
+        )
+    mean, std = _NORMALIZE_PRESETS[normalize_type]
+    mean_t = torch.tensor(mean, dtype=dtype, device=device).view(1, 3, 1, 1)
+    std_t = torch.tensor(std, dtype=dtype, device=device).view(1, 3, 1, 1)
+    return mean_t, std_t
 
 
 def transform_image(image_size, normalize_type="imagenet", interpolation_type="bilinear"):
@@ -31,15 +49,16 @@ def transform_image(image_size, normalize_type="imagenet", interpolation_type="b
         raise ValueError(
             f"Unknown interpolation_type '{interpolation_type}'. Choose from: {list(_INTERPOLATION_MAP)}"
         )
+    # Validate early, same error behavior as before.
     if normalize_type not in _NORMALIZE_PRESETS:
         raise ValueError(
-            f"Unknown normalize_type '{normalize_type}'. Choose from: {list(_NORMALIZE_PRESETS)}"
+            f"Unknown normalize_type '{normalize_type}'. Choose from: {sorted(_NORMALIZE_PRESETS)}"
         )
 
     cv2_interp = _INTERPOLATION_MAP[interpolation_type]
-    mean, std = _NORMALIZE_PRESETS[normalize_type]
-    mean = torch.tensor(mean, dtype=torch.float32).view(3, 1, 1)
-    std = torch.tensor(std, dtype=torch.float32).view(3, 1, 1)
+    mean_t, std_t = _resolve_mean_std(normalize_type)
+    mean = mean_t.view(3, 1, 1)  # transform() works on a single image (3,H,W), not a batch
+    std = std_t.view(3, 1, 1)
 
     target_size = (image_size, image_size) if isinstance(image_size, int) else tuple(image_size)
 
@@ -64,8 +83,6 @@ def transform_image(image_size, normalize_type="imagenet", interpolation_type="b
     return transform
 
 
-import torch
-
 def normalize_image(imgs: torch.Tensor, image_size: int, normalize_type: str) -> torch.Tensor:
     """
     Normalize a batch of images that are already scaled to [0, 1].
@@ -75,10 +92,8 @@ def normalize_image(imgs: torch.Tensor, image_size: int, normalize_type: str) ->
         image_size: Expected spatial size (H == W == image_size). Used only
             for a sanity check here, since resizing should already have
             happened upstream (e.g. via warpAffine or a Resize transform).
-        normalize_type: One of:
-            "01"        -> leave values in [0, 1], no further normalization.
-            "-1_1"      -> rescale [0, 1] to [-1, 1]  (x - 0.5) / 0.5
-            "imagenet"  -> standard ImageNet mean/std normalization.
+        normalize_type: Any key supported by transform_image's presets:
+            "01", "-1_1" (alias "arcface"/"neg1_1"), "imagenet", "clip".
 
     Returns:
         Normalized tensor, same shape as input.
@@ -92,18 +107,5 @@ def normalize_image(imgs: torch.Tensor, image_size: int, normalize_type: str) ->
             f"got {imgs.shape[-2]}x{imgs.shape[-1]}"
         )
 
-    if normalize_type == "01":
-        # Already in [0, 1] — no-op.
-        return imgs
-
-    elif normalize_type in ("-1_1", "neg1_1"):
-        # Rescale [0, 1] -> [-1, 1]
-        return imgs.sub(0.5).div(0.5)
-
-    elif normalize_type == "imagenet":
-        mean = torch.tensor([0.485, 0.456, 0.406], device=imgs.device).view(1, 3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225], device=imgs.device).view(1, 3, 1, 1)
-        return imgs.sub(mean).div(std)
-
-    else:
-        raise ValueError(f"Unknown normalize_type: {normalize_type}")
+    mean, std = _resolve_mean_std(normalize_type, device=imgs.device, dtype=imgs.dtype)
+    return (imgs - mean) / std
