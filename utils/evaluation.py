@@ -51,14 +51,20 @@ def calculate_val(thresholds,
 
     for fold_idx, (train_set, test_set) in enumerate(k_fold.split(indices)):
 
-        # Find the threshold that gives FAR = far_target
         far_train = np.zeros(nrof_thresholds)
         for threshold_idx, threshold in enumerate(thresholds):
             _, far_train[threshold_idx] = calculate_val_far(
                 threshold, dist[train_set], actual_issame[train_set])
+
         if np.max(far_train) >= far_target:
-            f = interpolate.interp1d(far_train, thresholds, kind='slinear')
-            threshold = f(far_target)
+            # Deduplicate far_train to satisfy interp1d's uniqueness requirement
+            far_train_unique, unique_idx = np.unique(far_train, return_index=True)
+            thresholds_unique = np.asarray(thresholds)[unique_idx]
+            if len(far_train_unique) > 1:
+                f = interpolate.interp1d(far_train_unique, thresholds_unique, kind='slinear')
+                threshold = f(far_target)
+            else:
+                threshold = thresholds_unique[0]
         else:
             threshold = 0.0
 
@@ -180,6 +186,10 @@ def evaluate(embeddings, actual_issame, nrof_folds=10, pca=0):
 def test(data_set, backbone, batch_size, nfolds=10):
     print('testing verification..')
 
+    # Determine the correct device from the model itself (works for both
+    # plain nn.Module and DistributedDataParallel-wrapped modules).
+    device = next(backbone.parameters()).device
+
     data_list = data_set[0]
     issame_list = data_set[1]
     embeddings_list = []
@@ -193,7 +203,7 @@ def test(data_set, backbone, batch_size, nfolds=10):
             count = bb - ba
             _data = data[bb - batch_size: bb]
             time0 = datetime.datetime.now()
-            img =  _data.to("cuda")
+            img = _data.to(device)
             net_out: torch.Tensor = backbone(img)
             _embeddings = net_out.detach().cpu().numpy()
             time_now = datetime.datetime.now()
