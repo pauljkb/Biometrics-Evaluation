@@ -19,19 +19,34 @@ from utils.utils_logging import init_eval_logging
 from utils.validate_ijb import ijb_eval
 from utils.validate_tinyface import tinyface_eval
 
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(device)
+
+# Fixed input sizes at eval time -> let cuDNN pick the fastest conv algorithms
+# instead of the (slower) default deterministic ones.
+if device == "cuda":
+    torch.backends.cudnn.benchmark = True
 
 
 def load_model(cfg):
-    # Load Model
-
-    weights = torch.load(cfg.checkpoint)
+    # Load checkpoint straight onto the target device -- avoids the extra
+    # CPU round-trip you get from torch.load(...) followed by .to(device).
+    weights = torch.load(cfg.checkpoint, map_location=device)
 
     net = get_model(cfg.network, **cfg)
     net.load_state_dict(weights)
-    model = torch.nn.DataParallel(net)
-    model = model.to(device)
-    model.eval()
+    net = net.to(device)
+    net.eval()
+
+    # DataParallel only helps when you actually have >1 GPU to split batches
+    # across -- on a single GPU (or CPU) it's pure overhead: every forward
+    # call replicates the model and scatters/gathers through Python. Only
+    # wrap when it can actually parallelize something.
+    n_gpus = torch.cuda.device_count()
+    if device == "cuda" and n_gpus > 1:
+        model = torch.nn.DataParallel(net)
+    else:
+        model = net
 
     return model
 
@@ -59,33 +74,34 @@ def evaluate(cfg):
     model = load_model(cfg)
 
     # Eval
-    if "FR" in cfg.eval_type:
-        logging.info("--- Small Benchmarks Evaluation ---")
-        callback_verification = CallBackVerification(
-            5, 0, cfg.val_targets_fr, cfg.bin_path,
-            cfg.image_size, transform, cfg.batch_size_eval, cfg.network)
+    with torch.inference_mode():
+        if "FR" in cfg.eval_type:
+            logging.info("--- Small Benchmarks Evaluation ---")
+            callback_verification = CallBackVerification(
+                5, 0, cfg.val_targets_fr, cfg.bin_path,
+                cfg.image_size, transform, cfg.batch_size_eval, cfg.network)
 
-        callback_verification(4, model)
+            callback_verification(4, model)
 
-    if "FR-Bias" in cfg.eval_type:
-        logging.info("--- Small Benchmarks Bias Evaluation ---")
-        callback_verification = CallBackVerification(
-            5, 0, cfg.val_targets_bias, cfg.bin_path,
-            cfg.image_size, transform, cfg.batch_size_eval, cfg.network)
+        if "FR-Bias" in cfg.eval_type:
+            logging.info("--- Small Benchmarks Bias Evaluation ---")
+            callback_verification = CallBackVerification(
+                5, 0, cfg.val_targets_bias, cfg.bin_path,
+                cfg.image_size, transform, cfg.batch_size_eval, cfg.network)
 
-        callback_verification(4, model)
+            callback_verification(4, model)
 
-    if "TinyFace" in cfg.eval_type:
-        logging.info("--- TinyFace Evaluation ---")
-        tinyface_eval(0, model, **cfg)
+        if "TinyFace" in cfg.eval_type:
+            logging.info("--- TinyFace Evaluation ---")
+            tinyface_eval(0, model, **cfg)
 
-    if "IJBB" in cfg.eval_type:
-        logging.info("--- IJBB Evaluation ---")
-        ijb_eval(0, model, target="IJBB", eval_path=cfg.ijbb_path, **cfg)
+        if "IJBB" in cfg.eval_type:
+            logging.info("--- IJBB Evaluation ---")
+            ijb_eval(0, model, target="IJBB", eval_path=cfg.ijbb_path, **cfg)
 
-    if "IJBC" in cfg.eval_type:
-        logging.info("--- IJBC Evaluation ---")
-        ijb_eval(0, model, target="IJBC", eval_path=cfg.ijbc_path, **cfg)
+        if "IJBC" in cfg.eval_type:
+            logging.info("--- IJBC Evaluation ---")
+            ijb_eval(0, model, target="IJBC", eval_path=cfg.ijbc_path, **cfg)
 
 
 if __name__ == "__main__":

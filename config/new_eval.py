@@ -9,8 +9,8 @@ config.num_features = 512
 config.num_register_token = 8
 config.image_size = 112
 config.batch_size_eval = 128
-config.normalize_type = "-1_1"
-config.interpolation_type = "bilinear"
+config.normalize_type = "clip" # "01", "-1_1", "arcface", "imagenet", "clip"
+config.interpolation_type = "bicubic" # "nearest", "bilinear", "bicubic", "area", "lanczos"
 
 # NEW
 config.checkpoint = "checkpoints/vitb_8reg_ms1mv3.pt"
@@ -22,8 +22,8 @@ config.eval_desc = "eval_desc"
 
 # EVAL
 config.bin_path = "./bins"
-config.eval_type = ["IJBB"] # FR, FR-Bias, TinyFace, IJBB, IJBC
-config.val_targets_fr = ['lfw', "cfp_fp", "agedb_30", "calfw", "cplfw"]
+config.eval_type = ["FR"] # FR, FR-Bias, TinyFace, IJBB, IJBC
+config.val_targets_fr = ['lfw', "cfp_fp", "agedb_30", ]#"calfw", "cplfw"]
 config.val_targets_bias = ["african_test", "asian_test", "caucasian_test", "indian_test"]
 
 # IJBC/IJBB

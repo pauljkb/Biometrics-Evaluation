@@ -2,20 +2,19 @@ import logging
 import os
 import datetime
 import pickle
-import time
 from typing import List
 
 import torch
-#import mxnet as mx
 import numpy as np
-import sklearn
 import cv2
 import sklearn.preprocessing as preprocessing
 from scipy import interpolate
 from sklearn.decomposition import PCA
 from sklearn.model_selection import KFold
-from transformers import AutoTokenizer, AutoModel
-import torch.nn.functional as F
+
+# Fixed-size eval batches -> let cuDNN autotune the fastest conv algorithms.
+torch.backends.cudnn.benchmark = True
+
 
 class LFold:
     def __init__(self, n_splits=2, shuffle=False):
@@ -31,11 +30,11 @@ class LFold:
 
 
 def calculate_val(thresholds,
-                  embeddings1,
-                  embeddings2,
-                  actual_issame,
-                  far_target,
-                  nrof_folds=10):
+                   embeddings1,
+                   embeddings2,
+                   actual_issame,
+                   far_target,
+                   nrof_folds=10):
     assert (embeddings1.shape[0] == embeddings2.shape[0])
     assert (embeddings1.shape[1] == embeddings2.shape[1])
     nrof_pairs = min(len(actual_issame), embeddings1.shape[0])
@@ -84,19 +83,17 @@ def calculate_val_far(threshold, dist, actual_issame):
         np.logical_and(predict_issame, np.logical_not(actual_issame)))
     n_same = np.sum(actual_issame)
     n_diff = np.sum(np.logical_not(actual_issame))
-    # print(true_accept, false_accept)
-    # print(n_same, n_diff)
     val = float(true_accept) / float(n_same)
     far = float(false_accept) / float(n_diff)
     return val, far
 
 
 def calculate_roc(thresholds,
-                  embeddings1,
-                  embeddings2,
-                  actual_issame,
-                  nrof_folds=10,
-                  pca=0):
+                   embeddings1,
+                   embeddings2,
+                   actual_issame,
+                   nrof_folds=10,
+                   pca=0):
     assert (embeddings1.shape[0] == embeddings2.shape[0])
     assert (embeddings1.shape[1] == embeddings2.shape[1])
     nrof_pairs = min(len(actual_issame), embeddings1.shape[0])
@@ -122,12 +119,11 @@ def calculate_roc(thresholds,
             pca_model.fit(_embed_train)
             embed1 = pca_model.transform(embeddings1)
             embed2 = pca_model.transform(embeddings2)
-            embed1 = sklearn.preprocessing.normalize(embed1)
-            embed2 = sklearn.preprocessing.normalize(embed2)
+            embed1 = preprocessing.normalize(embed1)
+            embed2 = preprocessing.normalize(embed2)
             diff = np.subtract(embed1, embed2)
             dist = np.sum(np.square(diff), 1)
 
-        # Find the best threshold for the fold
         acc_train = np.zeros((nrof_thresholds))
         for threshold_idx, threshold in enumerate(thresholds):
             _, _, acc_train[threshold_idx] = calculate_accuracy(
@@ -152,7 +148,7 @@ def calculate_accuracy(threshold, dist, actual_issame):
     fp = np.sum(np.logical_and(predict_issame, np.logical_not(actual_issame)))
     tn = np.sum(
         np.logical_and(np.logical_not(predict_issame),
-                       np.logical_not(actual_issame)))
+                        np.logical_not(actual_issame)))
     fn = np.sum(np.logical_and(np.logical_not(predict_issame), actual_issame))
 
     tpr = 0 if (tp + fn == 0) else float(tp) / float(tp + fn)
@@ -162,33 +158,31 @@ def calculate_accuracy(threshold, dist, actual_issame):
 
 
 def evaluate(embeddings, actual_issame, nrof_folds=10, pca=0):
-    # Calculate evaluation metrics
     thresholds = np.arange(0, 4, 0.01)
     embeddings1 = embeddings[0::2]
     embeddings2 = embeddings[1::2]
     tpr, fpr, accuracy = calculate_roc(thresholds,
+                                        embeddings1,
+                                        embeddings2,
+                                        np.asarray(actual_issame),
+                                        nrof_folds=nrof_folds,
+                                        pca=pca)
+    thresholds = np.arange(0, 4, 0.001)
+    val, val_std, far = calculate_val(thresholds,
                                        embeddings1,
                                        embeddings2,
                                        np.asarray(actual_issame),
-                                       nrof_folds=nrof_folds,
-                                       pca=pca)
-    thresholds = np.arange(0, 4, 0.001)
-    val, val_std, far = calculate_val(thresholds,
-                                      embeddings1,
-                                      embeddings2,
-                                      np.asarray(actual_issame),
-                                      1e-3,
-                                      nrof_folds=nrof_folds)
+                                       1e-3,
+                                       nrof_folds=nrof_folds)
     return tpr, fpr, accuracy, val, val_std, far
 
 
 @torch.no_grad()
-def test(data_set, backbone, batch_size, nfolds=10):
+def test(data_set, backbone, batch_size, nfolds=10, use_amp=True):
     print('testing verification..')
 
-    # Determine the correct device from the model itself (works for both
-    # plain nn.Module and DistributedDataParallel-wrapped modules).
     device = next(backbone.parameters()).device
+    use_amp = use_amp and device.type == 'cuda'
 
     data_list = data_set[0]
     issame_list = data_set[1]
@@ -196,6 +190,11 @@ def test(data_set, backbone, batch_size, nfolds=10):
     time_consumed = 0.0
     for i in range(len(data_list)):
         data = data_list[i]
+        # Pinning host memory makes the H2D copy below async/overlappable
+        # instead of a blocking memcpy.
+        if device.type == 'cuda' and not data.is_pinned():
+            data = data.pin_memory()
+
         embeddings = None
         ba = 0
         while ba < data.shape[0]:
@@ -203,9 +202,12 @@ def test(data_set, backbone, batch_size, nfolds=10):
             count = bb - ba
             _data = data[bb - batch_size: bb]
             time0 = datetime.datetime.now()
-            img = _data.to(device)
-            net_out: torch.Tensor = backbone(img)
-            _embeddings = net_out.detach().cpu().numpy()
+            img = _data.to(device, non_blocking=True)
+
+            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+                net_out: torch.Tensor = backbone(img)
+
+            _embeddings = net_out.float().detach().cpu().numpy()
             time_now = datetime.datetime.now()
             diff = time_now - time0
             time_consumed += diff.total_seconds()
@@ -225,8 +227,10 @@ def test(data_set, backbone, batch_size, nfolds=10):
             _xnorm_cnt += 1
     _xnorm /= _xnorm_cnt
 
-    embeddings = embeddings_list[0].copy()
-    embeddings = preprocessing.normalize(embeddings)
+    # (Removed: the original computed `preprocessing.normalize(embeddings_list[0].copy())`
+    # here and immediately threw the result away by reassigning `embeddings` below.
+    # That was dead work -- a full normalize() pass over the whole embedding
+    # matrix for a value that's never used.)
     acc1 = 0.0
     std1 = 0.0
     embeddings = embeddings_list[0] + embeddings_list[1]
@@ -238,16 +242,13 @@ def test(data_set, backbone, batch_size, nfolds=10):
     return acc1, std1, acc2, std2, _xnorm, embeddings_list
 
 
-import numpy as np
-import cv2
-
 def load_bin(path, image_size, transform):
     image_size = (image_size, image_size)
 
     try:
         with open(path, 'rb') as f:
             bins, issame_list = pickle.load(f)  # py2
-    except UnicodeDecodeError as e:
+    except UnicodeDecodeError:
         with open(path, 'rb') as f:
             bins, issame_list = pickle.load(f, encoding='bytes')  # py3
     data_list = []
@@ -273,28 +274,21 @@ def load_bin(path, image_size, transform):
                 new_h = int(round(h * (image_size[0] / w)))
             img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
         elif img.shape[1] != image_size[0]:
-            # matches original check: only resizes based on shape[1] (width)
             h, w = img.shape[:2]
             scale = image_size[0] / w
             new_w = image_size[0]
             new_h = int(round(h * scale))
             img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
-        img = transform(img)  # returns e.g. CHW numpy array or torch tensor
+        img = transform(img)
         img = np.asarray(img)
 
         for flip in [0, 1]:
             if flip == 1:
-                # original flips axis=2 on the post-transform array (C, H, W),
-                # i.e. flips along the width axis == horizontal flip
                 img_flipped = np.flip(img, axis=2).copy()
             else:
                 img_flipped = img
             data_list[flip][idx][:] = torch.from_numpy(img_flipped)
-        if idx % 1000 == 0:
-            #print('loading bin', idx)
-            pass
-    #print(data_list[0].shape)
     return data_list, issame_list
 
 
