@@ -23,10 +23,14 @@ from pathlib import Path
 from torchvision import transforms
 
 from backbone import get_model, get_output_dim
-from config.vit_b import config as cfg
+#from config.vit_b import config as cfg
 #from finetuning import apply_lora_model
 from utils.transform import normalize_image
 from torchvision import transforms
+
+
+cfg = None
+
 
 sys.path.insert(0, "../")
 warnings.filterwarnings("ignore")
@@ -274,16 +278,18 @@ def read_score(path):
         img_feats = pickle.load(fid)
     return img_feats
 
-def ijb_eval(rank, model, target, eval_path, **kwargs):
+def ijb_eval(rank, model, target, eval_path, config):
     target = target
-    eval_desc = kwargs["eval_desc"]
-    batch_size = kwargs["batch_size_eval"]
-    image_size = kwargs["image_size"]
+    global cfg
+    cfg = config
+    eval_desc = cfg.eval_desc
+    batch_size = cfg.batch_size_eval
+    image_size = cfg.image_size
     image_path = eval_path
-    use_flip_test = kwargs["use_flip_test"]
-    use_detector_score = kwargs["use_detector_score"]
-    use_norm_score = kwargs["use_norm_score"]
-    result_dir = kwargs["output"]
+    use_flip_test = cfg.use_flip_test
+    use_detector_score = cfg.use_detector_score
+    use_norm_score = cfg.use_norm_score
+    result_dir = cfg.output
 
     ###### Step1: Load Meta Data ######
     print("Step1: Load Meta Data for " + str(target))

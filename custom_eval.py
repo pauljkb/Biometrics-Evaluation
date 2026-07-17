@@ -97,11 +97,11 @@ def evaluate(cfg):
 
         if "IJBB" in cfg.eval_type:
             logging.info("--- IJBB Evaluation ---")
-            ijb_eval(0, model, target="IJBB", eval_path=cfg.ijbb_path, **cfg)
+            ijb_eval(0, model, target="IJBB", eval_path=cfg.ijbb_path, config=cfg)
 
         if "IJBC" in cfg.eval_type:
             logging.info("--- IJBC Evaluation ---")
-            ijb_eval(0, model, target="IJBC", eval_path=cfg.ijbc_path, **cfg)
+            ijb_eval(0, model, target="IJBC", eval_path=cfg.ijbc_path, config=cfg)
 
 
 if __name__ == "__main__":

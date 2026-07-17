@@ -9,7 +9,7 @@ config.num_features = 512
 config.num_register_token = 8
 config.image_size = 112
 config.batch_size_eval = 128
-config.normalize_type = "clip" # "01", "-1_1", "arcface", "imagenet", "clip"
+config.normalize_type = "arcface" # "01", "-1_1", "arcface", "imagenet", "clip"
 config.interpolation_type = "bicubic" # "nearest", "bilinear", "bicubic", "area", "lanczos"
 
 # NEW
