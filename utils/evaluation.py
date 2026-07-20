@@ -6,8 +6,8 @@ import time
 from typing import List
 import sys
 import torch
-
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import cv2
 from mxnet import ndarray as nd
 import mxnet as mx
 import numpy as np
@@ -243,29 +243,40 @@ def test(data_set, backbone, batch_size, nfolds=10):
 
 
 @torch.no_grad()
-def load_bin(path, image_size, transform):
+def load_bin(path, image_size, transform=None, num_workers=8):
+    image_size = (image_size, image_size)
     try:
         with open(path, 'rb') as f:
             bins, issame_list = pickle.load(f)  # py2
-    except UnicodeDecodeError as e:
+    except UnicodeDecodeError:
         with open(path, 'rb') as f:
             bins, issame_list = pickle.load(f, encoding='bytes')  # py3
-    data_list = []
-    for flip in [0, 1]:
-        data = torch.empty((len(issame_list) * 2, 3, image_size[0], image_size[1]))
-        data_list.append(data)
-    for idx in range(len(issame_list) * 2):
-        _bin = bins[idx]
-        img = mx.image.imdecode(_bin)
-        if img.shape[1] != image_size[0]:
-            img = mx.image.resize_short(img, image_size[0])
-        img = nd.transpose(img, axes=(2, 0, 1))
-        for flip in [0, 1]:
-            if flip == 1:
-                img = mx.ndarray.flip(data=img, axis=2)
-            data_list[flip][idx][:] = torch.from_numpy(img.asnumpy())
-        if idx % 1000 == 0:
-            print('loading bin', idx)
+
+    n = len(issame_list) * 2
+    # uint8 storage is 4x smaller than float32 and just as fast to fill;
+    # cast to float later if/when you actually feed the model
+    data_list = [torch.empty((n, 3, image_size[0], image_size[1]), dtype=torch.uint8)
+                 for _ in range(2)]
+
+    def process(idx):
+        buf = np.frombuffer(bins[idx], dtype=np.uint8)
+        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)          # BGR, HWC
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        if img.shape[0] != image_size[0] or img.shape[1] != image_size[1]:
+            img = cv2.resize(img, (image_size[1], image_size[0]),
+                              interpolation=cv2.INTER_LINEAR)
+        t = torch.from_numpy(img).permute(2, 0, 1).contiguous()  # CHW, uint8
+        return idx, t
+
+    with ThreadPoolExecutor(max_workers=num_workers) as ex:
+        futures = [ex.submit(process, idx) for idx in range(n)]
+        for i, fut in enumerate(as_completed(futures)):
+            idx, t = fut.result()
+            data_list[0][idx] = t
+            data_list[1][idx] = torch.flip(t, dims=[2])  # flip width
+            if i % 1000 == 0:
+                print('loading bin', i)
+
     print(data_list[0].shape)
     return data_list, issame_list
 
@@ -308,7 +319,7 @@ class CallBackVerification(object):
             path = os.path.join(data_dir, name + ".bin")
             if os.path.exists(path):
                 print("loading bin " + name)
-                data_set = load_bin(path, [image_size, image_size], transform)
+                data_set = load_bin(path, image_size, transform)
                 self.ver_list.append(data_set)
                 self.ver_name_list.append(name)
 
