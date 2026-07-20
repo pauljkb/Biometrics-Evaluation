@@ -20,6 +20,7 @@ from sklearn.model_selection import KFold
 from transformers import AutoTokenizer, AutoModel
 import torch.nn.functional as F
 
+
 class LFold:
     def __init__(self, n_splits=2, shuffle=False):
         self.n_splits = n_splits
@@ -60,16 +61,13 @@ def calculate_val(thresholds,
             _, far_train[threshold_idx] = calculate_val_far(
                 threshold, dist[train_set], actual_issame[train_set])
         if np.max(far_train) >= far_target:
-            # scipy's interp1d now requires strictly unique x-values;
-            # far_train commonly has duplicates (e.g. multiple thresholds
-            # giving 0 false accepts), so dedupe before interpolating
             far_train_unique, unique_idx = np.unique(far_train, return_index=True)
-            thresholds_arr = np.asarray(thresholds)[unique_idx]
-            if len(far_train_unique) > 1:
-                f = interpolate.interp1d(far_train_unique, thresholds_arr, kind='slinear')
-                threshold = f(far_target)
+            thresholds_unique = np.asarray(thresholds)[unique_idx]
+            if len(far_train_unique) < 2:
+                threshold = thresholds_unique[0]
             else:
-                threshold = 0.0
+                f = interpolate.interp1d(far_train_unique, thresholds_unique, kind='slinear')
+                threshold = f(far_target)
         else:
             threshold = 0.0
 
@@ -80,6 +78,8 @@ def calculate_val(thresholds,
     far_mean = np.mean(far)
     val_std = np.std(val)
     return val_mean, val_std, far_mean
+
+
 
 
 def calculate_val_far(threshold, dist, actual_issame):
@@ -94,6 +94,7 @@ def calculate_val_far(threshold, dist, actual_issame):
     val = float(true_accept) / float(n_same)
     far = float(false_accept) / float(n_diff)
     return val, far
+
 
 
 def calculate_roc(thresholds,
@@ -190,7 +191,6 @@ def evaluate(embeddings, actual_issame, nrof_folds=10, pca=0):
 @torch.no_grad()
 def test(data_set, backbone, batch_size, nfolds=10):
     print('testing verification..')
-
     data_list = data_set[0]
     issame_list = data_set[1]
     embeddings_list = []
@@ -204,7 +204,10 @@ def test(data_set, backbone, batch_size, nfolds=10):
             count = bb - ba
             _data = data[bb - batch_size: bb]
             time0 = datetime.datetime.now()
-            img =  _data.to("cuda")
+            img = ((_data / 255) - 0.5) / 0.5
+
+            img = img.to(next(backbone.parameters()).device)
+
             net_out: torch.Tensor = backbone(img)
             _embeddings = net_out.detach().cpu().numpy()
             time_now = datetime.datetime.now()
@@ -227,11 +230,11 @@ def test(data_set, backbone, batch_size, nfolds=10):
     _xnorm /= _xnorm_cnt
 
     embeddings = embeddings_list[0].copy()
-    embeddings = preprocessing.normalize(embeddings)
+    embeddings = sklearn.preprocessing.normalize(embeddings)
     acc1 = 0.0
     std1 = 0.0
     embeddings = embeddings_list[0] + embeddings_list[1]
-    embeddings = preprocessing.normalize(embeddings)
+    embeddings = sklearn.preprocessing.normalize(embeddings)
     print(embeddings.shape)
     print('infer time', time_consumed)
     _, _, accuracy, val, val_std, far = evaluate(embeddings, issame_list, nrof_folds=nfolds)
