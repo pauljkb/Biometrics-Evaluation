@@ -107,7 +107,7 @@ def tinyface_eval(rank, model, **kwargs):
 
     tinyface_test = tinyface_helper.TinyFaceTest(tinyface_root=data_root, alignment_dir_name='tinyface_aligned')
     img_paths = tinyface_test.image_paths
-    dataloader = data_utils.prepare_dataloader(img_paths,  batch_size_eval, num_workers=0)
+    dataloader = data_utils.prepare_dataloader(img_paths,  batch_size_eval, num_workers=16)
 
     features, norms = infer(rank, model, dataloader, use_flip_test=use_flip_test, fusion_method=fusion_method)
     results = tinyface_test.test_identification(features, ranks=[1,5,20])

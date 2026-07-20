@@ -3,10 +3,11 @@ import os
 import datetime
 import pickle
 from typing import List
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import torch
 import numpy as np
 import cv2
+
 import sklearn.preprocessing as preprocessing
 from scipy import interpolate
 from sklearn.decomposition import PCA
@@ -30,11 +31,11 @@ class LFold:
 
 
 def calculate_val(thresholds,
-                   embeddings1,
-                   embeddings2,
-                   actual_issame,
-                   far_target,
-                   nrof_folds=10):
+                  embeddings1,
+                  embeddings2,
+                  actual_issame,
+                  far_target,
+                  nrof_folds=10):
     assert (embeddings1.shape[0] == embeddings2.shape[0])
     assert (embeddings1.shape[1] == embeddings2.shape[1])
     nrof_pairs = min(len(actual_issame), embeddings1.shape[0])
@@ -50,20 +51,19 @@ def calculate_val(thresholds,
 
     for fold_idx, (train_set, test_set) in enumerate(k_fold.split(indices)):
 
+        # Find the threshold that gives FAR = far_target
         far_train = np.zeros(nrof_thresholds)
         for threshold_idx, threshold in enumerate(thresholds):
             _, far_train[threshold_idx] = calculate_val_far(
                 threshold, dist[train_set], actual_issame[train_set])
-
         if np.max(far_train) >= far_target:
-            # Deduplicate far_train to satisfy interp1d's uniqueness requirement
             far_train_unique, unique_idx = np.unique(far_train, return_index=True)
             thresholds_unique = np.asarray(thresholds)[unique_idx]
-            if len(far_train_unique) > 1:
+            if len(far_train_unique) < 2:
+                threshold = thresholds_unique[0]
+            else:
                 f = interpolate.interp1d(far_train_unique, thresholds_unique, kind='slinear')
                 threshold = f(far_target)
-            else:
-                threshold = thresholds_unique[0]
         else:
             threshold = 0.0
 
@@ -178,23 +178,14 @@ def evaluate(embeddings, actual_issame, nrof_folds=10, pca=0):
 
 
 @torch.no_grad()
-def test(data_set, backbone, batch_size, nfolds=10, use_amp=True):
+def test(data_set, backbone, batch_size, nfolds=10):
     print('testing verification..')
-
-    device = next(backbone.parameters()).device
-    use_amp = use_amp and device.type == 'cuda'
-
     data_list = data_set[0]
     issame_list = data_set[1]
     embeddings_list = []
     time_consumed = 0.0
     for i in range(len(data_list)):
         data = data_list[i]
-        # Pinning host memory makes the H2D copy below async/overlappable
-        # instead of a blocking memcpy.
-        if device.type == 'cuda' and not data.is_pinned():
-            data = data.pin_memory()
-
         embeddings = None
         ba = 0
         while ba < data.shape[0]:
@@ -202,12 +193,12 @@ def test(data_set, backbone, batch_size, nfolds=10, use_amp=True):
             count = bb - ba
             _data = data[bb - batch_size: bb]
             time0 = datetime.datetime.now()
-            img = _data.to(device, non_blocking=True)
+            img = ((_data / 255) - 0.5) / 0.5
 
-            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
-                net_out: torch.Tensor = backbone(img)
+            img = img.to(next(backbone.parameters()).device)
 
-            _embeddings = net_out.float().detach().cpu().numpy()
+            net_out: torch.Tensor = backbone(img)
+            _embeddings = net_out.detach().cpu().numpy()
             time_now = datetime.datetime.now()
             diff = time_now - time0
             time_consumed += diff.total_seconds()
@@ -227,10 +218,8 @@ def test(data_set, backbone, batch_size, nfolds=10, use_amp=True):
             _xnorm_cnt += 1
     _xnorm /= _xnorm_cnt
 
-    # (Removed: the original computed `preprocessing.normalize(embeddings_list[0].copy())`
-    # here and immediately threw the result away by reassigning `embeddings` below.
-    # That was dead work -- a full normalize() pass over the whole embedding
-    # matrix for a value that's never used.)
+    embeddings = embeddings_list[0].copy()
+    embeddings = preprocessing.normalize(embeddings)
     acc1 = 0.0
     std1 = 0.0
     embeddings = embeddings_list[0] + embeddings_list[1]
@@ -242,55 +231,43 @@ def test(data_set, backbone, batch_size, nfolds=10, use_amp=True):
     return acc1, std1, acc2, std2, _xnorm, embeddings_list
 
 
-def load_bin(path, image_size, transform):
+@torch.no_grad()
+def load_bin(path, image_size, transform=None, num_workers=8):
     image_size = (image_size, image_size)
-
     try:
         with open(path, 'rb') as f:
             bins, issame_list = pickle.load(f)  # py2
     except UnicodeDecodeError:
         with open(path, 'rb') as f:
             bins, issame_list = pickle.load(f, encoding='bytes')  # py3
-    data_list = []
-    for flip in [0, 1]:
-        data = torch.empty((len(issame_list) * 2, 3, image_size[0], image_size[1]))
-        data_list.append(data)
-    for idx in range(len(issame_list) * 2):
-        _bin = bins[idx]
 
-        # mx.image.imdecode decodes to RGB; cv2.imdecode gives BGR, so convert.
-        img_bgr = cv2.imdecode(np.frombuffer(_bin, dtype=np.uint8), cv2.IMREAD_COLOR)
-        img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    n = len(issame_list) * 2
+    # uint8 storage is 4x smaller than float32 and just as fast to fill;
+    # cast to float later if/when you actually feed the model
+    data_list = [torch.empty((n, 3, image_size[0], image_size[1]), dtype=torch.uint8)
+                 for _ in range(2)]
 
-        # mx.image.resize_short: resizes so the shorter side == image_size[0],
-        # preserving aspect ratio, using bilinear interpolation.
-        if img.shape[0] != image_size[0] and img.shape[1] != image_size[0]:
-            h, w = img.shape[:2]
-            if h < w:
-                new_h = image_size[0]
-                new_w = int(round(w * (image_size[0] / h)))
-            else:
-                new_w = image_size[0]
-                new_h = int(round(h * (image_size[0] / w)))
-            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        elif img.shape[1] != image_size[0]:
-            h, w = img.shape[:2]
-            scale = image_size[0] / w
-            new_w = image_size[0]
-            new_h = int(round(h * scale))
-            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    def process(idx):
+        buf = np.frombuffer(bins[idx], dtype=np.uint8)
+        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)          # BGR, HWC
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        if img.shape[0] != image_size[0] or img.shape[1] != image_size[1]:
+            img = cv2.resize(img, (image_size[1], image_size[0]),
+                              interpolation=cv2.INTER_LINEAR)
+        t = torch.from_numpy(img).permute(2, 0, 1).contiguous()  # CHW, uint8
+        return idx, t
 
-        img = transform(img)
-        img = np.asarray(img)
+    with ThreadPoolExecutor(max_workers=num_workers) as ex:
+        futures = [ex.submit(process, idx) for idx in range(n)]
+        for i, fut in enumerate(as_completed(futures)):
+            idx, t = fut.result()
+            data_list[0][idx] = t
+            data_list[1][idx] = torch.flip(t, dims=[2])  # flip width
+            if i % 1000 == 0:
+                print('loading bin', i)
 
-        for flip in [0, 1]:
-            if flip == 1:
-                img_flipped = np.flip(img, axis=2).copy()
-            else:
-                img_flipped = img
-            data_list[flip][idx][:] = torch.from_numpy(img_flipped)
+    print(data_list[0].shape)
     return data_list, issame_list
-
 
 class CallBackVerification(object):
     def __init__(self, frequent, rank, val_targets, rec_prefix, image_size, transform, batch_size_eval, model_name):

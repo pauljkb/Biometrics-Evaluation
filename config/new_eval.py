@@ -8,7 +8,7 @@ config.fp16 = False
 config.num_features = 512
 config.num_register_token = 8
 config.image_size = 112
-config.batch_size_eval = 128
+config.batch_size_eval = 128 # 128 seems to be the sweetspot
 config.normalize_type = "arcface" # "01", "-1_1", "arcface", "imagenet", "clip"
 config.interpolation_type = "bicubic" # "nearest", "bilinear", "bicubic", "area", "lanczos"
 
@@ -22,8 +22,8 @@ config.eval_desc = "eval_desc"
 
 # EVAL
 config.bin_path = "./bins"
-config.eval_type = ["FR"] # FR, FR-Bias, TinyFace, IJBB, IJBC
-config.val_targets_fr = ['lfw', "cfp_fp", "agedb_30", ]#"calfw", "cplfw"]
+config.eval_type = ["FLOPS"] # FR, FR-Bias, TinyFace, IJBB, IJBC
+config.val_targets_fr = ["agedb_30", "calfw", "cplfw"]
 config.val_targets_bias = ["african_test", "asian_test", "caucasian_test", "indian_test"]
 
 # IJBC/IJBB
@@ -36,4 +36,5 @@ config.use_flip_test = True
 #TinyFace
 config.tinyface_path = "/igd/a1/Share/Chettaoui/Evaluation"
 config.fusion_method = "norm_weighted_avg"
+config.num_workers = 16 #TODO: update val_tinyface to load this value
 
