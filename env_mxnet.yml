@@ -2,9 +2,8 @@ name: eval
 channels:
   - conda-forge
 dependencies:
-  - python=3.13
+  - python=3.9
   - pip
-  - pandas
   - onnxruntime
   - transformers
   - tqdm
@@ -14,8 +13,9 @@ dependencies:
   - timm
   - pip:
     - mxnet
-    - numpy
-    - opencv-python
+    - numpy<1.20
+    - opencv-python==4.5.5.62
+    - pandas==1.4
     - torch
     - torchvision
     - matplotlib

@@ -7,8 +7,7 @@ from typing import List
 import sys
 import torch
 
-VENDOR_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../vendor"))
-sys.path.insert(0, VENDOR_PATH)
+
 from mxnet import ndarray as nd
 import mxnet as mx
 import numpy as np
@@ -240,9 +239,8 @@ def test(data_set, backbone, batch_size, nfolds=10):
     return acc1, std1, acc2, std2, _xnorm, embeddings_list
 
 
+@torch.no_grad()
 def load_bin(path, image_size, transform):
-    image_size = (image_size, image_size)
-
     try:
         with open(path, 'rb') as f:
             bins, issame_list = pickle.load(f)  # py2
@@ -258,19 +256,14 @@ def load_bin(path, image_size, transform):
         img = mx.image.imdecode(_bin)
         if img.shape[1] != image_size[0]:
             img = mx.image.resize_short(img, image_size[0])
-
-        img = transform(img.asnumpy())
-        img = mx.nd.array(img)
-        # img = nd.transpose(img, axes=(2, 0, 1)) # TODO
-
+        img = nd.transpose(img, axes=(2, 0, 1))
         for flip in [0, 1]:
             if flip == 1:
                 img = mx.ndarray.flip(data=img, axis=2)
             data_list[flip][idx][:] = torch.from_numpy(img.asnumpy())
         if idx % 1000 == 0:
-            #print('loading bin', idx)
-            pass
-    #print(data_list[0].shape)
+            print('loading bin', idx)
+    print(data_list[0].shape)
     return data_list, issame_list
 
 
@@ -312,7 +305,7 @@ class CallBackVerification(object):
             path = os.path.join(data_dir, name + ".bin")
             if os.path.exists(path):
                 print("loading bin " + name)
-                data_set = load_bin(path, image_size, transform)
+                data_set = load_bin(path, [image_size, image_size], transform)
                 self.ver_list.append(data_set)
                 self.ver_name_list.append(name)
 
