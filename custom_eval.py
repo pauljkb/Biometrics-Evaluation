@@ -22,15 +22,14 @@ from utils.validate_tinyface import tinyface_eval
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(device)
 
-# Fixed input sizes at eval time -> let cuDNN pick the fastest conv algorithms
-# instead of the (slower) default deterministic ones.
+
 if device == "cuda":
     torch.backends.cudnn.benchmark = True
 
 
 def load_model(cfg):
-    # Load checkpoint straight onto the target device -- avoids the extra
-    # CPU round-trip you get from torch.load(...) followed by .to(device).
+
+
     weights = torch.load(cfg.checkpoint, map_location=device)
 
     net = get_model(cfg.network, **cfg)
@@ -38,10 +37,8 @@ def load_model(cfg):
     net = net.to(device)
     net.eval()
 
-    # DataParallel only helps when you actually have >1 GPU to split batches
-    # across -- on a single GPU (or CPU) it's pure overhead: every forward
-    # call replicates the model and scatters/gathers through Python. Only
-    # wrap when it can actually parallelize something.
+
+    #TODO: Flop eval only works with 1 GPU currently, should investigate different options for multi-gpu support
     n_gpus = torch.cuda.device_count()
     if device == "cuda" and n_gpus > 1:
         model = torch.nn.DataParallel(net)
