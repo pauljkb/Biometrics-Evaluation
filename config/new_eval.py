@@ -23,7 +23,7 @@ config.eval_desc = "eval_desc"
 # EVAL
 config.bin_path = "./bins"
 config.eval_type = ["FR"] # FR, FR-Bias, TinyFace, IJBB, IJBC
-config.val_targets_fr = ['lfw', "cfp_fp", "agedb_30", ]#"calfw", "cplfw"]
+config.val_targets_fr = ['lfw', "cfp_fp", "agedb_30",]# "calfw", "cplfw"]
 config.val_targets_bias = ["african_test", "asian_test", "caucasian_test", "indian_test"]
 
 # IJBC/IJBB

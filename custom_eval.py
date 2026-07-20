@@ -103,6 +103,48 @@ def evaluate(cfg):
             logging.info("--- IJBC Evaluation ---")
             ijb_eval(0, model, target="IJBC", eval_path=cfg.ijbc_path, config=cfg)
 
+        if "FLOPS" in cfg.eval_type:
+            input_size = (3, cfg.image_size, cfg.image_size)
+            inputs = torch.randn(1, 3, 112, 112).cuda()
+
+            print("---------------  PTFLOPS  ---------------")
+            from ptflops import get_model_complexity_info
+            macs, params = get_model_complexity_info(
+                                model, input_size, as_strings=False,
+                                print_per_layer_stat=False, verbose=False
+                            )
+            gmacs = macs / (1000**3)
+            print("%.3f GFLOPs"%gmacs)
+            print("%.3f Mparams"%(params/(1000**2)))
+
+
+            #print("---------------  FVCORE  ---------------")
+            #from fvcore.nn import FlopCountAnalysis, parameter_count, flop_count_table
+            #flops = FlopCountAnalysis(model, inputs)
+            #params = parameter_count(model)
+            #print(f"FLOPs: {flops.total() / 1e9:.2f} GFLOPs")
+            #print(flop_count_table(flops, max_depth=4))
+            #print(f"Params: {params[''] / 1e6:.2f} M")
+
+
+            print("---------------  DEEPSPEED  ---------------")
+            from deepspeed.profiling.flops_profiler import get_model_profile
+            flops, macs, params = get_model_profile(
+                model=model,
+                args=(inputs,),
+                print_profile=True,
+                detailed=False,
+                module_depth=-1,
+            )
+
+            print("---------------  calflops  ---------------")
+            from calflops import calculate_flops
+            flops, macs, params = calculate_flops(model=model, 
+                                                input_shape=(1,3,112,112),
+                                                output_as_string=True,
+                                                output_precision=4)
+            print("FLOPs:%s   MACs:%s   Params:%s \n" %(flops, macs, params))
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Eval Model")

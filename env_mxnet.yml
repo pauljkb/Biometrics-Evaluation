@@ -1,0 +1,26 @@
+name: eval
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  - pip
+  - pandas
+  - onnxruntime
+  - transformers
+  - tqdm
+  - easydict
+  - scikit-learn
+  - scikit-image
+  - timm
+  - pip:
+    - mxnet
+    - numpy
+    - opencv-python
+    - torch
+    - torchvision
+    - matplotlib
+    - menpo
+    - prettytable
+    - ptflops
+    - deepspeed
+    - calflops
